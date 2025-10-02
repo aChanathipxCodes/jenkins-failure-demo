@@ -2,6 +2,8 @@ pipeline {
   agent any
   environment {
     REPORT_DIR = 'security-reports'
+    PY_IMAGE   = 'python:3.11-slim'
+    TRIVY_IMG  = 'aquasec/trivy:latest'
   }
 
   stages {
@@ -16,17 +18,20 @@ pipeline {
       steps {
         sh '''
           set +e
-          docker run --rm -u root -v "$PWD":/src -w /src python:3.11-slim bash -lc '
-            python -m pip install --no-cache-dir -q --upgrade pip &&
-            pip install --no-cache-dir -q semgrep &&
-            semgrep --config=p/owasp-top-ten --config=p/python \
-                    --severity ERROR \
-                    --sarif --output /src/'"$REPORT_DIR"'/semgrep.sarif \
-                    --error
-          '
-          SEMGREP_RC=$?
-          echo $SEMGREP_RC > "$REPORT_DIR/semgrep.rc"
-          exit 0
+          docker run --rm -u root \
+            -v "$WORKSPACE":/src -w /src ${PY_IMAGE} bash -lc '
+              python -m pip install --no-cache-dir -q --upgrade pip &&
+              pip install --no-cache-dir -q semgrep &&
+              semgrep \
+                --config=p/owasp-top-ten \
+                --config=p/python \
+                --include "**/*.py" \
+                --severity ERROR \
+                --sarif --output "/src/${REPORT_DIR}/semgrep.sarif" \
+                --error
+            '
+          echo $? > "${REPORT_DIR}/semgrep.rc"
+          set -e
         '''
       }
     }
@@ -35,13 +40,14 @@ pipeline {
       steps {
         sh '''
           set +e
-          docker run --rm -u root -v "$PWD":/src -w /src python:3.11-slim bash -lc '
-            python -m pip install --no-cache-dir -q --upgrade pip &&
-            pip install --no-cache-dir -q bandit &&
-            bandit -q -r . -f sarif -o /src/'"$REPORT_DIR"'/bandit.sarif || true
-          '
-          echo 0 > "$REPORT_DIR/bandit.rc"
-          exit 0
+          docker run --rm -u root \
+            -v "$WORKSPACE":/src -w /src ${PY_IMAGE} bash -lc '
+              python -m pip install --no-cache-dir -q --upgrade pip &&
+              pip install --no-cache-dir -q bandit &&
+              bandit -q -r . -f json -o "/src/${REPORT_DIR}/bandit.json"
+            '
+          echo $? > "${REPORT_DIR}/bandit.rc"
+          set -e
         '''
       }
     }
@@ -51,18 +57,18 @@ pipeline {
         sh '''
           set +e
           if [ -f requirements.txt ]; then
-            docker run --rm -u root -v "$PWD":/src -w /src python:3.11-slim bash -lc '
-              python -m pip install --no-cache-dir -q --upgrade pip &&
-              pip install --no-cache-dir -q pip-audit &&
-              # ติดตั้งให้ครบเพื่อไม่เกิด false-positive จาก pkg ที่ยังไม่ลง
-              (pip install --no-cache-dir -q -r requirements.txt || true) &&
-              pip-audit -r requirements.txt -f json -o /src/'"$REPORT_DIR"'/pip-audit.json || true
-            '
+            docker run --rm -u root \
+              -v "$WORKSPACE":/src -w /src ${PY_IMAGE} bash -lc '
+                python -m pip install --no-cache-dir -q --upgrade pip &&
+                pip install --no-cache-dir -q pip-audit &&
+                (pip install --no-cache-dir -q -r requirements.txt || true) &&
+                pip-audit -r requirements.txt -f json -o "/src/${REPORT_DIR}/pip-audit.json"
+              '
+            echo $? > "${REPORT_DIR}/pip-audit.rc"
           else
-            echo '{"results":[]}' > "$REPORT_DIR/pip-audit.json"
+            echo 0 > "${REPORT_DIR}/pip-audit.rc"
           fi
-          echo 0 > "$REPORT_DIR/pip-audit.rc"
-          exit 0
+          set -e
         '''
       }
     }
@@ -71,13 +77,14 @@ pipeline {
       steps {
         sh '''
           set +e
-          docker run --rm -u root -v "$PWD":/src -w /src aquasec/trivy:latest fs \
-            --scanners secret,config \
-            --format sarif --output /src/'"$REPORT_DIR"'/trivy.sarif \
-            --exit-code 1 --quiet /src
-          TRIVY_RC=$?
-          echo $TRIVY_RC > "$REPORT_DIR/trivy.rc"
-          exit 0
+          docker run --rm -u root \
+            -v "$WORKSPACE":/src -w /src ${TRIVY_IMG} \
+            fs --scanners secret,config \
+               --format sarif \
+               --output "/src/${REPORT_DIR}/trivy.sarif" \
+               --exit-code 1 --quiet /src
+          echo $? > "${REPORT_DIR}/trivy.rc"
+          set -e
         '''
       }
     }
@@ -87,21 +94,13 @@ pipeline {
         sh '''
           set -e
           FAIL=0
-          for f in "$REPORT_DIR"/*.rc; do
-            [ -f "$f" ] || continue
-            v=$(cat "$f" 2>/dev/null || echo 0)
-            if [ "$v" -ne 0 ]; then
-              echo "Fail flag from $(basename "$f"): $v"
-              FAIL=1
+          for f in semgrep.rc bandit.rc pip-audit.rc trivy.rc; do
+            if [ -f "${REPORT_DIR}/$f" ]; then
+              v=$(cat "${REPORT_DIR}/$f")
+              [ "$v" -ne 0 ] && echo "Fail flag from $f: $v" && FAIL=1
             fi
           done
-
-          if [ "$FAIL" -ne 0 ]; then
-            echo "Security checks failed."
-            exit 1
-          else
-            echo "All security checks passed."
-          fi
+          [ "$FAIL" -ne 0 ] && echo "Security checks failed." && exit 1 || echo "Security checks passed."
         '''
       }
     }
@@ -109,8 +108,8 @@ pipeline {
 
   post {
     always {
-      archiveArtifacts artifacts: 'security-reports/**', fingerprint: false, allowEmptyArchive: true
-      echo 'Scan completed. Reports archived in security-reports/'
+      archiveArtifacts artifacts: "${REPORT_DIR}/**", fingerprint: true
+      echo "Scan completed. Reports archived in ${REPORT_DIR}/"
     }
   }
 }
