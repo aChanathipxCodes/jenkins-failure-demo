@@ -1,20 +1,20 @@
-from flask import Flask, request
-import yaml, json, hashlib, subprocess, requests
+import sqlite3
+import os
 
-app = Flask(__name__)
+# ใช้ prepared statements เพื่อป้องกัน SQL injection
+def query_database(query, params):
+    connection = sqlite3.connect('example.db')
+    cursor = connection.cursor()
+    cursor.execute(query, params)  # SQL Injection ปลอดภัย
+    result = cursor.fetchall()
+    connection.close()
+    return result
 
-@app.get("/hello")
-def hello():
-    name = request.args.get("name", "world")
-    _ = hashlib.sha256(name.encode()).hexdigest()
-    return {"message": f"hello {name}"}
-
-@app.post("/parse")
-def parse():
-    data = yaml.safe_load(request.data or b"{}")
-    return data
+def main():
+    user_input = 'admin'
+    query = "SELECT * FROM users WHERE username = ?"
+    result = query_database(query, (user_input,))
+    print(result)
 
 if __name__ == "__main__":
-    subprocess.run(["echo", "ok"], check=True)
-    r = requests.get("https://example.com", timeout=3)
-    app.run(host="0.0.0.0", port=5000)
+    main()

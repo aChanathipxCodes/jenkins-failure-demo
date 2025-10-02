@@ -1,3 +1,2 @@
-flask
-pyyaml
-requests
+semgrep
+bandit

@@ -1,0 +1,6 @@
+rules:
+  - id: sql-injection
+    pattern: |
+      $QUERY = "SELECT * FROM users WHERE username = '$USER'"
+    message: "Potential SQL Injection"
+    severity: ERROR
